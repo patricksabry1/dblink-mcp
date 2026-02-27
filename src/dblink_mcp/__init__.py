@@ -1,1 +1,1 @@
-"""DBLink MCP package."""
+"""dblink_mcp package."""
