@@ -26,6 +26,16 @@ from mcp.types import (
 from pydantic import AnyUrl
 import json
 import os
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+
+from dblink_mcp.config.models import (
+    OracleConnectionConfig,
+    PostgreSQLConnectionConfig,
+    SnowflakeConnectionConfig,
+)
+from dblink_mcp.services.query_service import execute_query as execute_query_with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +61,6 @@ class DatabaseConnector(ABC):
         """Execute a read-only query and return results as DataFrame"""
         pass
     
-    @abstractmethod
-    def validate_readonly_query(self, query: str) -> bool:
-        """Validate that query is read-only"""
-        pass
-
 class SnowflakeConnector(DatabaseConnector):
     """Snowflake database connector"""
     
@@ -85,9 +90,6 @@ class SnowflakeConnector(DatabaseConnector):
             logger.info("Disconnected from Snowflake")
     
     async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
-        if not self.validate_readonly_query(query):
-            raise ValueError("Only SELECT queries are allowed")
-        
         try:
             cursor = self.connection.cursor()
             cursor.execute(query, params or {})
@@ -97,16 +99,6 @@ class SnowflakeConnector(DatabaseConnector):
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class OracleConnector(DatabaseConnector):
     """Oracle database connector"""
@@ -139,25 +131,12 @@ class OracleConnector(DatabaseConnector):
             logger.info("Disconnected from Oracle")
     
     async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
-        if not self.validate_readonly_query(query):
-            raise ValueError("Only SELECT queries are allowed")
-        
         try:
             df = pd.read_sql(query, self.connection, params=params or {})
             return df
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class PostgreSQLConnector(DatabaseConnector):
     """PostgreSQL database connector"""
@@ -186,25 +165,12 @@ class PostgreSQLConnector(DatabaseConnector):
             logger.info("Disconnected from PostgreSQL")
     
     async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
-        if not self.validate_readonly_query(query):
-            raise ValueError("Only SELECT queries are allowed")
-        
         try:
             df = pd.read_sql(query, self.connection, params=params or {})
             return df
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class DatabaseManager:
     """Manages multiple database connections"""
@@ -278,10 +244,13 @@ class DatabaseManager:
                 raise ValueError(f"Missing required configuration for {db_type}: {missing_fields}")
         
         if db_type_lower == 'snowflake':
+            resolved_config = SnowflakeConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = SnowflakeConnector(resolved_config)
         elif db_type_lower == 'oracle':
+            resolved_config = OracleConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = OracleConnector(resolved_config)
         elif db_type_lower == 'postgresql':
+            resolved_config = PostgreSQLConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = PostgreSQLConnector(resolved_config)
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
@@ -300,7 +269,7 @@ class DatabaseManager:
         if connection_name not in self.connectors:
             raise ValueError(f"Connection '{connection_name}' not found")
         
-        return await self.connectors[connection_name].execute_query(query, params)
+        return await execute_query_with_policy(self.connectors[connection_name], query, params)
 
 class DataComparator:
     """Utilities for comparing data between databases"""

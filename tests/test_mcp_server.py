@@ -7,6 +7,11 @@ import asyncio
 import pandas as pd
 from unittest.mock import Mock, patch, AsyncMock
 import json
+import os
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
+
 from server import (
     DatabaseManager, 
     DataComparator, 
@@ -15,6 +20,8 @@ from server import (
     OracleConnector,
     SnowflakeConnector
 )
+from dblink_mcp.config.models import QueryPolicyConfig
+from dblink_mcp.security.sql_policy import SQLPolicyError, evaluate_sql_policy
 
 class TestDatabaseConnectors:
     """Test database connector implementations"""
@@ -43,24 +50,32 @@ class TestDatabaseConnectors:
         assert connector.connection_config == config
         assert connector.connection is None
     
-    @pytest.mark.parametrize("query,expected", [
-        ("SELECT * FROM table", True),
-        ("select id, name from users", True),
-        ("WITH cte AS (SELECT * FROM table) SELECT * FROM cte", True),
-        ("SHOW TABLES", True),
-        ("DESCRIBE table", True),
-        ("INSERT INTO table VALUES (1, 'test')", False),
-        ("UPDATE table SET name = 'test'", False),
-        ("DELETE FROM table", False),
-        ("DROP TABLE table", False),
-        ("CREATE TABLE test (id INT)", False),
-        ("ALTER TABLE test ADD COLUMN name VARCHAR(50)", False),
-        ("TRUNCATE TABLE test", False),
-        ("MERGE INTO target USING source ON condition", False),
-    ])
-    def test_query_validation(self, query, expected):
-        connector = PostgreSQLConnector({})
-        assert connector.validate_readonly_query(query) == expected
+
+
+
+class TestSQLPolicy:
+    def test_allows_select_by_default(self):
+        evaluate_sql_policy("SELECT * FROM users")
+
+    def test_denies_multi_statement(self):
+        with pytest.raises(SQLPolicyError, match="Multi-statement"):
+            evaluate_sql_policy("SELECT 1; SELECT 2")
+
+    def test_schema_allowlist(self):
+        policy = QueryPolicyConfig(allowed_schemas={"public"})
+        evaluate_sql_policy("SELECT * FROM public.users", policy)
+        with pytest.raises(SQLPolicyError, match="disallowed schemas"):
+            evaluate_sql_policy("SELECT * FROM admin.users", policy)
+
+    def test_table_allowlist(self):
+        policy = QueryPolicyConfig(allowed_tables={"users"})
+        evaluate_sql_policy("SELECT * FROM users", policy)
+        with pytest.raises(SQLPolicyError, match="disallowed tables"):
+            evaluate_sql_policy("SELECT * FROM payments", policy)
+
+    def test_statement_type_policy(self):
+        with pytest.raises(SQLPolicyError, match="not allowed"):
+            evaluate_sql_policy("SHOW TABLES", QueryPolicyConfig(allowed_statement_types={"select"}))
 
 class TestDatabaseManager:
     """Test DatabaseManager functionality"""
