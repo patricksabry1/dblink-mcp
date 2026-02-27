@@ -7,7 +7,7 @@ import pytest
 import asyncio
 import os
 import pandas as pd
-from server import DatabaseManager, DataComparator, TestGenerator
+from dblink_mcp.server import DatabaseManager, DataComparator, TestGenerator
 
 # Test configuration
 ORACLE_CONFIG = {
