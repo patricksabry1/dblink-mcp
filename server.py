@@ -26,6 +26,16 @@ from mcp.types import (
 from pydantic import AnyUrl
 import json
 import os
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+
+from dblink_mcp.config.models import (
+    OracleConnectionConfig,
+    PostgreSQLConnectionConfig,
+    SnowflakeConnectionConfig,
+)
+from dblink_mcp.services.query_service import execute_query as execute_query_with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +65,6 @@ class DatabaseConnector(ABC):
         """Execute a read-only query and return results as DataFrame"""
         pass
     
-    @abstractmethod
-    def validate_readonly_query(self, query: str) -> bool:
-        """Validate that query is read-only"""
-        pass
-
 class SnowflakeConnector(DatabaseConnector):
     """Snowflake database connector"""
     
@@ -101,16 +106,6 @@ class SnowflakeConnector(DatabaseConnector):
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class OracleConnector(DatabaseConnector):
     """Oracle database connector"""
@@ -152,16 +147,6 @@ class OracleConnector(DatabaseConnector):
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class PostgreSQLConnector(DatabaseConnector):
     """PostgreSQL database connector"""
@@ -199,16 +184,6 @@ class PostgreSQLConnector(DatabaseConnector):
         except Exception as e:
             logger.error(f"Query execution failed: {e}")
             raise
-    
-    def validate_readonly_query(self, query: str) -> bool:
-        query_upper = query.strip().upper()
-        readonly_keywords = ['SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'DESC']
-        forbidden_keywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'MERGE']
-        
-        starts_with_readonly = any(query_upper.startswith(keyword) for keyword in readonly_keywords)
-        contains_forbidden = any(keyword in query_upper for keyword in forbidden_keywords)
-        
-        return starts_with_readonly and not contains_forbidden
 
 class DatabaseManager:
     """Manages multiple database connections from the async MCP service layer.
@@ -307,10 +282,13 @@ class DatabaseManager:
                 raise ValueError(f"Missing required configuration for {db_type}: {missing_fields}")
         
         if db_type_lower == 'snowflake':
+            resolved_config = SnowflakeConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = SnowflakeConnector(resolved_config)
         elif db_type_lower == 'oracle':
+            resolved_config = OracleConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = OracleConnector(resolved_config)
         elif db_type_lower == 'postgresql':
+            resolved_config = PostgreSQLConnectionConfig.model_validate(resolved_config).model_dump(mode="python")
             connector = PostgreSQLConnector(resolved_config)
         else:
             raise ValueError(f"Unsupported database type: {db_type}")

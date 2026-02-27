@@ -17,15 +17,19 @@ dependencies = [
     "cx_Oracle>=8.0.0",
     "psycopg2-binary>=2.9.0",
     "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0"
+    "pytest-asyncio>=0.21.0",
+    "sqlglot>=25.0.0"
 ]
 
 [project.scripts]
-dblink-mcp = "server:main"
+dblink-mcp = "dblink_mcp.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["server*"]
+where = [".", "src"]
+include = ["server*", "dblink_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
