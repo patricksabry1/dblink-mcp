@@ -14,7 +14,13 @@ An MCP (Model Context Protocol) server for automating cross-database querying an
 ## Installation
 
 ```bash
-pip install -e .
+uv sync
+```
+
+This installs runtime dependencies by default. For local development tooling (tests + lint + format), use:
+
+```bash
+uv sync --extra dev
 ```
 
 ## Usage
@@ -22,7 +28,7 @@ pip install -e .
 ### Running the MCP Server
 
 ```bash
-python server.py
+uv run dblink-mcp
 ```
 
 The server runs using stdio transport and provides the following tools:
@@ -198,6 +204,26 @@ cp .env.example .env
 | | `POSTGRESQL_PORT` | Port |
 | | `POSTGRESQL_DATABASE` | Database name |
 
+## UV Workflow and Lockfile
+
+Use `uv` for dependency management and reproducible environments:
+
+```bash
+# Refresh lockfile after dependency changes
+uv lock
+
+# Sync environment from lockfile
+uv sync --extra dev
+
+# Run tests
+uv run pytest
+
+# Run MCP server
+uv run dblink-mcp
+```
+
+Commit `uv.lock` with dependency updates to keep CI and local installs reproducible.
+
 ## Development and Testing
 
 ### Test Environment Setup
@@ -209,16 +235,20 @@ Start the containerized test environment:
 docker-compose up -d
 
 # Run quick functionality test
-python test_runner.py --quick-test
+uv run python test_runner.py --quick-test
 
 # Run all tests
-python test_runner.py
+uv run python test_runner.py
 
 # Run only unit tests
-python test_runner.py --unit-only
+uv run python test_runner.py --unit-only
 
 # Run only integration tests (requires Docker)
-python test_runner.py --integration-only
+uv run python test_runner.py --integration-only
+
+# Lint and format checks
+uv run ruff check .
+uv run ruff format --check .
 
 # Stop test environment
 docker-compose down
@@ -242,12 +272,13 @@ export POSTGRESQL_PASSWORD=testpass
 4. **Data Validation**: Always compare schemas and data types between databases
 5. **Security Testing**: Verify read-only query enforcement
 
-## Dependencies
+## Dependency Groups
 
-- `mcp>=1.0.0` - Model Context Protocol framework
-- `pandas>=2.0.0` - Data manipulation and analysis
-- `snowflake-connector-python>=3.0.0` - Snowflake database connector
-- `cx_Oracle>=8.0.0` - Oracle database connector
-- `psycopg2-binary>=2.9.0` - PostgreSQL database connector
-- `pytest>=7.0.0` - Testing framework
-- `pytest-asyncio>=0.21.0` - Async testing support
+Runtime dependencies are defined in `[project.dependencies]` in `pyproject.toml`.
+
+Optional groups are available via `[project.optional-dependencies]`:
+
+- `test`: pytest tooling
+- `lint`: ruff lint/format tooling
+- `dev`: includes both `test` and `lint`
+

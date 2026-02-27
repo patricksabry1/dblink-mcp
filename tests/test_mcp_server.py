@@ -7,7 +7,7 @@ import asyncio
 import pandas as pd
 from unittest.mock import Mock, patch, AsyncMock
 import json
-from server import (
+from dblink_mcp.server import (
     DatabaseManager, 
     DataComparator, 
     TestGenerator,
@@ -15,6 +15,8 @@ from server import (
     OracleConnector,
     SnowflakeConnector
 )
+from dblink_mcp.config.models import QueryPolicyConfig
+from dblink_mcp.security.sql_policy import SQLPolicyError, evaluate_sql_policy
 
 class TestDatabaseConnectors:
     """Test database connector implementations"""
@@ -43,24 +45,32 @@ class TestDatabaseConnectors:
         assert connector.connection_config == config
         assert connector.connection is None
     
-    @pytest.mark.parametrize("query,expected", [
-        ("SELECT * FROM table", True),
-        ("select id, name from users", True),
-        ("WITH cte AS (SELECT * FROM table) SELECT * FROM cte", True),
-        ("SHOW TABLES", True),
-        ("DESCRIBE table", True),
-        ("INSERT INTO table VALUES (1, 'test')", False),
-        ("UPDATE table SET name = 'test'", False),
-        ("DELETE FROM table", False),
-        ("DROP TABLE table", False),
-        ("CREATE TABLE test (id INT)", False),
-        ("ALTER TABLE test ADD COLUMN name VARCHAR(50)", False),
-        ("TRUNCATE TABLE test", False),
-        ("MERGE INTO target USING source ON condition", False),
-    ])
-    def test_query_validation(self, query, expected):
-        connector = PostgreSQLConnector({})
-        assert connector.validate_readonly_query(query) == expected
+
+
+
+class TestSQLPolicy:
+    def test_allows_select_by_default(self):
+        evaluate_sql_policy("SELECT * FROM users")
+
+    def test_denies_multi_statement(self):
+        with pytest.raises(SQLPolicyError, match="Multi-statement"):
+            evaluate_sql_policy("SELECT 1; SELECT 2")
+
+    def test_schema_allowlist(self):
+        policy = QueryPolicyConfig(allowed_schemas={"public"})
+        evaluate_sql_policy("SELECT * FROM public.users", policy)
+        with pytest.raises(SQLPolicyError, match="disallowed schemas"):
+            evaluate_sql_policy("SELECT * FROM admin.users", policy)
+
+    def test_table_allowlist(self):
+        policy = QueryPolicyConfig(allowed_tables={"users"})
+        evaluate_sql_policy("SELECT * FROM users", policy)
+        with pytest.raises(SQLPolicyError, match="disallowed tables"):
+            evaluate_sql_policy("SELECT * FROM payments", policy)
+
+    def test_statement_type_policy(self):
+        with pytest.raises(SQLPolicyError, match="not allowed"):
+            evaluate_sql_policy("SHOW TABLES", QueryPolicyConfig(allowed_statement_types={"select"}))
 
 class TestDatabaseManager:
     """Test DatabaseManager functionality"""
@@ -79,7 +89,7 @@ class TestDatabaseManager:
             'password': 'testpass'
         }
         
-        with patch.object(PostgreSQLConnector, 'connect', new_callable=AsyncMock):
+        with patch.object(PostgreSQLConnector, 'connect'):
             await db_manager.add_connection('test_pg', 'postgresql', config)
             assert 'test_pg' in db_manager.connectors
             assert isinstance(db_manager.connectors['test_pg'], PostgreSQLConnector)
@@ -94,7 +104,7 @@ class TestDatabaseManager:
             'password': 'testpass'
         }
         
-        with patch.object(OracleConnector, 'connect', new_callable=AsyncMock):
+        with patch.object(OracleConnector, 'connect'):
             await db_manager.add_connection('test_oracle', 'oracle', config)
             assert 'test_oracle' in db_manager.connectors
             assert isinstance(db_manager.connectors['test_oracle'], OracleConnector)
@@ -108,8 +118,8 @@ class TestDatabaseManager:
     async def test_remove_connection(self, db_manager):
         config = {'host': 'localhost', 'port': 5432, 'database': 'testdb', 'user': 'test', 'password': 'test'}
         
-        with patch.object(PostgreSQLConnector, 'connect', new_callable=AsyncMock):
-            with patch.object(PostgreSQLConnector, 'disconnect', new_callable=AsyncMock) as mock_disconnect:
+        with patch.object(PostgreSQLConnector, 'connect'):
+            with patch.object(PostgreSQLConnector, 'disconnect') as mock_disconnect:
                 await db_manager.add_connection('test_pg', 'postgresql', config)
                 await db_manager.remove_connection('test_pg')
                 
@@ -120,6 +130,47 @@ class TestDatabaseManager:
     async def test_execute_query_unknown_connection(self, db_manager):
         with pytest.raises(ValueError, match="Connection 'unknown' not found"):
             await db_manager.execute_query('unknown', 'SELECT 1')
+
+
+    @pytest.mark.asyncio
+    async def test_execute_query_runs_in_thread_wrapper(self, db_manager):
+        config = {
+            'host': 'localhost',
+            'port': 5432,
+            'database': 'testdb',
+            'user': 'testuser',
+            'password': 'testpass'
+        }
+
+        expected_df = pd.DataFrame({'id': [1]})
+
+        with patch.object(PostgreSQLConnector, 'connect'):
+            await db_manager.add_connection('test_pg', 'postgresql', config)
+
+        with patch.object(db_manager, '_run_blocking', new_callable=AsyncMock, return_value=expected_df) as mock_run_blocking:
+            result = await db_manager.execute_query('test_pg', 'SELECT 1')
+
+        assert result.equals(expected_df)
+        mock_run_blocking.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_all_connections(self, db_manager):
+        config = {
+            'host': 'localhost',
+            'port': 5432,
+            'database': 'testdb',
+            'user': 'testuser',
+            'password': 'testpass'
+        }
+
+        with patch.object(PostgreSQLConnector, 'connect'):
+            await db_manager.add_connection('pg1', 'postgresql', config)
+            await db_manager.add_connection('pg2', 'postgresql', config)
+
+        with patch.object(db_manager, 'remove_connection', new_callable=AsyncMock) as mock_remove:
+            await db_manager.shutdown()
+
+        assert mock_remove.await_count == 2
 
 class TestDataComparator:
     """Test data comparison functionality"""
@@ -275,7 +326,7 @@ class TestIntegrationScenarios:
         # Verify the generated test has all required components
         assert 'import pytest' in test_script
         assert 'import pandas as pd' in test_script
-        assert 'from server import DatabaseManager, DataComparator' in test_script
+        assert 'from dblink_mcp.server import DatabaseManager, DataComparator' in test_script
         assert '@pytest.mark.asyncio' in test_script
         assert 'async def test_employee_data_migration():' in test_script
         assert 'testschema.employees' in test_script

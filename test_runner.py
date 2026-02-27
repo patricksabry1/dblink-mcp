@@ -4,12 +4,15 @@ Test runner and environment setup for DBLink MCP Server
 """
 import subprocess
 import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "src"))
 import time
 import os
 import asyncio
 import psycopg2
 import cx_Oracle
-from server import DatabaseManager
+from dblink_mcp.server import DatabaseManager
 
 def check_docker_compose():
     """Check if Docker Compose is available"""

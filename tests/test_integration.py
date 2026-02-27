@@ -7,7 +7,7 @@ import pytest
 import asyncio
 import os
 import pandas as pd
-from server import DatabaseManager, DataComparator, TestGenerator
+from dblink_mcp.server import DatabaseManager, DataComparator, TestGenerator
 
 # Test configuration
 ORACLE_CONFIG = {
@@ -177,7 +177,6 @@ class TestErrorHandling:
         from unittest.mock import Mock, AsyncMock
         mock_connector = Mock()
         mock_connector.execute_query = AsyncMock(side_effect=Exception("SQL syntax error"))
-        mock_connector.validate_readonly_query = Mock(return_value=True)
         
         manager.connectors['test'] = mock_connector
         
@@ -200,7 +199,6 @@ class TestPerformance:
         for i in range(5):
             mock_connector = Mock()
             mock_connector.execute_query = AsyncMock(return_value=pd.DataFrame({'id': [1, 2, 3]}))
-            mock_connector.validate_readonly_query = Mock(return_value=True)
             manager.connectors[f'conn_{i}'] = mock_connector
         
         # Execute queries concurrently
