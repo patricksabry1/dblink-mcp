@@ -21,11 +21,14 @@ dependencies = [
 ]
 
 [project.scripts]
-dblink-mcp = "server:main"
+dblink-mcp = "dblink_mcp.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["server*"]
+where = ["src"]
+include = ["dblink_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
