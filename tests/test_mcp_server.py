@@ -7,12 +7,7 @@ import asyncio
 import pandas as pd
 from unittest.mock import Mock, patch, AsyncMock
 import json
-import os
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from server import (
+from dblink_mcp.server import (
     DatabaseManager, 
     DataComparator, 
     TestGenerator,
@@ -330,8 +325,8 @@ class TestIntegrationScenarios:
         
         # Verify the generated test has all required components
         assert 'import pytest' in test_script
-        assert 'from dblink_mcp.services.query_service import DatabaseManager' in test_script
-        assert 'from dblink_mcp.services.comparison_service import DataComparator' in test_script
+        assert 'import pandas as pd' in test_script
+        assert 'from dblink_mcp.server import DatabaseManager, DataComparator' in test_script
         assert '@pytest.mark.asyncio' in test_script
         assert 'async def test_employee_data_migration():' in test_script
         assert 'testschema.employees' in test_script
