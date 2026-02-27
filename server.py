@@ -40,31 +40,35 @@ from dblink_mcp.services.query_service import execute_query as execute_query_wit
 logger = logging.getLogger(__name__)
 
 class DatabaseConnector(ABC):
-    """Abstract base class for database connectors"""
+    """Abstract base class for synchronous database connectors.
+
+    Connector implementations are intentionally blocking and should only be
+    invoked from the async service layer via ``DatabaseManager._run_blocking``.
+    """
     
     def __init__(self, connection_config: Dict[str, Any]):
         self.connection_config = connection_config
         self.connection = None
     
     @abstractmethod
-    async def connect(self):
+    def connect(self):
         """Establish database connection"""
         pass
     
     @abstractmethod
-    async def disconnect(self):
+    def disconnect(self):
         """Close database connection"""
         pass
     
     @abstractmethod
-    async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+    def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
         """Execute a read-only query and return results as DataFrame"""
         pass
     
 class SnowflakeConnector(DatabaseConnector):
     """Snowflake database connector"""
     
-    async def connect(self):
+    def connect(self):
         try:
             import snowflake.connector
             from snowflake.connector.pandas_tools import pd_writer
@@ -84,12 +88,15 @@ class SnowflakeConnector(DatabaseConnector):
             logger.error(f"Failed to connect to Snowflake: {e}")
             raise
     
-    async def disconnect(self):
+    def disconnect(self):
         if self.connection:
             self.connection.close()
             logger.info("Disconnected from Snowflake")
     
-    async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+    def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+        if not self.validate_readonly_query(query):
+            raise ValueError("Only SELECT queries are allowed")
+        
         try:
             cursor = self.connection.cursor()
             cursor.execute(query, params or {})
@@ -103,7 +110,7 @@ class SnowflakeConnector(DatabaseConnector):
 class OracleConnector(DatabaseConnector):
     """Oracle database connector"""
     
-    async def connect(self):
+    def connect(self):
         try:
             import cx_Oracle
             
@@ -125,12 +132,15 @@ class OracleConnector(DatabaseConnector):
             logger.error(f"Failed to connect to Oracle: {e}")
             raise
     
-    async def disconnect(self):
+    def disconnect(self):
         if self.connection:
             self.connection.close()
             logger.info("Disconnected from Oracle")
     
-    async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+    def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+        if not self.validate_readonly_query(query):
+            raise ValueError("Only SELECT queries are allowed")
+        
         try:
             df = pd.read_sql(query, self.connection, params=params or {})
             return df
@@ -141,7 +151,7 @@ class OracleConnector(DatabaseConnector):
 class PostgreSQLConnector(DatabaseConnector):
     """PostgreSQL database connector"""
     
-    async def connect(self):
+    def connect(self):
         try:
             import psycopg2
             
@@ -159,12 +169,15 @@ class PostgreSQLConnector(DatabaseConnector):
             logger.error(f"Failed to connect to PostgreSQL: {e}")
             raise
     
-    async def disconnect(self):
+    def disconnect(self):
         if self.connection:
             self.connection.close()
             logger.info("Disconnected from PostgreSQL")
     
-    async def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+    def execute_query(self, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
+        if not self.validate_readonly_query(query):
+            raise ValueError("Only SELECT queries are allowed")
+        
         try:
             df = pd.read_sql(query, self.connection, params=params or {})
             return df
@@ -173,10 +186,35 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
 class DatabaseManager:
-    """Manages multiple database connections"""
+    """Manages multiple database connections from the async MCP service layer.
+
+    All connector methods are blocking and are executed on worker threads using
+    ``asyncio.to_thread``. This keeps the event loop responsive while running
+    DB driver calls.
+    """
     
     def __init__(self):
         self.connectors: Dict[str, DatabaseConnector] = {}
+        self.operation_timeout_seconds = 30
+
+    async def _run_blocking(self, operation, *args, timeout: Optional[int] = None):
+        """Run a blocking connector operation in a worker thread.
+
+        Cancellation and timeout are propagated to the caller. Note that Python
+        threads cannot be forcefully interrupted; cancellation/timeout only
+        stops awaiting the result while the DB driver call may still complete in
+        the background.
+        """
+        timeout_seconds = timeout if timeout is not None else self.operation_timeout_seconds
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(operation, *args), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            operation_name = getattr(operation, "__name__", str(operation))
+            raise TimeoutError(f"Operation '{operation_name}' timed out after {timeout_seconds} seconds") from exc
+        except asyncio.CancelledError:
+            logger.warning("Blocking database operation cancelled")
+            raise
     
     @staticmethod
     def _resolve_config_with_env(config: Dict[str, Any], db_type: str) -> Dict[str, Any]:
@@ -255,21 +293,31 @@ class DatabaseManager:
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
         
-        await connector.connect()
+        await self._run_blocking(connector.connect)
         self.connectors[name] = connector
     
     async def remove_connection(self, name: str):
         """Remove a database connection"""
         if name in self.connectors:
-            await self.connectors[name].disconnect()
+            await self._run_blocking(self.connectors[name].disconnect)
             del self.connectors[name]
     
     async def execute_query(self, connection_name: str, query: str, params: Optional[Dict] = None) -> pd.DataFrame:
-        """Execute query on specified connection"""
+        """Execute query on specified connection via a worker thread."""
         if connection_name not in self.connectors:
             raise ValueError(f"Connection '{connection_name}' not found")
         
-        return await execute_query_with_policy(self.connectors[connection_name], query, params)
+        connector = self.connectors[connection_name]
+        return await self._run_blocking(connector.execute_query, query, params)
+
+    async def shutdown(self):
+        """Close all active connections during server shutdown."""
+        connection_names = list(self.connectors.keys())
+        for name in connection_names:
+            try:
+                await self.remove_connection(name)
+            except Exception as exc:
+                logger.error("Failed to close connection '%s' during shutdown: %s", name, exc)
 
 class DataComparator:
     """Utilities for comparing data between databases"""
@@ -469,7 +517,7 @@ async def handle_list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool calls"""
+    """Handle tool calls using thread-offloaded connector operations."""
     
     try:
         if name == "add_database_connection":
@@ -564,18 +612,21 @@ async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
 async def main():
     # Run the server using stdin/stdout streams
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="dblink-mcp",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+        try:
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="dblink-mcp",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+        finally:
+            await db_manager.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())

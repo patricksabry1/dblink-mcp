@@ -198,6 +198,15 @@ cp .env.example .env
 | | `POSTGRESQL_PORT` | Port |
 | | `POSTGRESQL_DATABASE` | Database name |
 
+
+## Concurrency and Connection Lifecycle
+
+- Connector classes (`SnowflakeConnector`, `OracleConnector`, `PostgreSQLConnector`) expose **synchronous** `connect`, `execute_query`, and `disconnect` methods.
+- The MCP service layer (`DatabaseManager`) runs blocking DB driver calls in worker threads via `asyncio.to_thread`, wrapped with timeout and cancellation-aware handling.
+- Default operation timeout is 30 seconds (`DatabaseManager.operation_timeout_seconds`). If a timeout is hit, the awaiter receives an error while the underlying driver call may continue until the driver returns.
+- Connections are pooled in-memory by name for the life of the process; each connection is expected to be used by one tool call at a time to avoid driver-level thread safety issues.
+- On server shutdown, `DatabaseManager.shutdown()` is invoked to close all active connections cleanly.
+
 ## Development and Testing
 
 ### Test Environment Setup
