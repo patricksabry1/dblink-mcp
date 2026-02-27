@@ -79,7 +79,7 @@ class TestDatabaseManager:
             'password': 'testpass'
         }
         
-        with patch.object(PostgreSQLConnector, 'connect', new_callable=AsyncMock):
+        with patch.object(PostgreSQLConnector, 'connect'):
             await db_manager.add_connection('test_pg', 'postgresql', config)
             assert 'test_pg' in db_manager.connectors
             assert isinstance(db_manager.connectors['test_pg'], PostgreSQLConnector)
@@ -94,7 +94,7 @@ class TestDatabaseManager:
             'password': 'testpass'
         }
         
-        with patch.object(OracleConnector, 'connect', new_callable=AsyncMock):
+        with patch.object(OracleConnector, 'connect'):
             await db_manager.add_connection('test_oracle', 'oracle', config)
             assert 'test_oracle' in db_manager.connectors
             assert isinstance(db_manager.connectors['test_oracle'], OracleConnector)
@@ -108,8 +108,8 @@ class TestDatabaseManager:
     async def test_remove_connection(self, db_manager):
         config = {'host': 'localhost', 'port': 5432, 'database': 'testdb', 'user': 'test', 'password': 'test'}
         
-        with patch.object(PostgreSQLConnector, 'connect', new_callable=AsyncMock):
-            with patch.object(PostgreSQLConnector, 'disconnect', new_callable=AsyncMock) as mock_disconnect:
+        with patch.object(PostgreSQLConnector, 'connect'):
+            with patch.object(PostgreSQLConnector, 'disconnect') as mock_disconnect:
                 await db_manager.add_connection('test_pg', 'postgresql', config)
                 await db_manager.remove_connection('test_pg')
                 
@@ -120,6 +120,47 @@ class TestDatabaseManager:
     async def test_execute_query_unknown_connection(self, db_manager):
         with pytest.raises(ValueError, match="Connection 'unknown' not found"):
             await db_manager.execute_query('unknown', 'SELECT 1')
+
+
+    @pytest.mark.asyncio
+    async def test_execute_query_runs_in_thread_wrapper(self, db_manager):
+        config = {
+            'host': 'localhost',
+            'port': 5432,
+            'database': 'testdb',
+            'user': 'testuser',
+            'password': 'testpass'
+        }
+
+        expected_df = pd.DataFrame({'id': [1]})
+
+        with patch.object(PostgreSQLConnector, 'connect'):
+            await db_manager.add_connection('test_pg', 'postgresql', config)
+
+        with patch.object(db_manager, '_run_blocking', new_callable=AsyncMock, return_value=expected_df) as mock_run_blocking:
+            result = await db_manager.execute_query('test_pg', 'SELECT 1')
+
+        assert result.equals(expected_df)
+        mock_run_blocking.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_all_connections(self, db_manager):
+        config = {
+            'host': 'localhost',
+            'port': 5432,
+            'database': 'testdb',
+            'user': 'testuser',
+            'password': 'testpass'
+        }
+
+        with patch.object(PostgreSQLConnector, 'connect'):
+            await db_manager.add_connection('pg1', 'postgresql', config)
+            await db_manager.add_connection('pg2', 'postgresql', config)
+
+        with patch.object(db_manager, 'remove_connection', new_callable=AsyncMock) as mock_remove:
+            await db_manager.shutdown()
+
+        assert mock_remove.await_count == 2
 
 class TestDataComparator:
     """Test data comparison functionality"""
